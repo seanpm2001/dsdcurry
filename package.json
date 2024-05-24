@@ -1,12 +1,12 @@
 {
     "name": "dsdcurry",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "author": "Sergio Antoy, Michael Hanus",
     "maintainer": "Michael Hanus <mh@informatik.uni-kiel.de>",
     "synopsis": "A tool for declarative software development",
     "category": [ "Programming", "Debugging" ],
     "dependencies": {
-        "abstract-curry" : ">= 1.0.0"
+        "abstract-curry" : ">= 4.0.0"
     },
     "compilerCompatibility": {
         "pakcs": ">= 1.10.0, < 2.0.0"
