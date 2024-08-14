@@ -19,6 +19,6 @@ sort'spec x | y =:= perm x & sorted y = y  where y free
 
 -- We do not provide an implementation yet:
 sort :: [Int] -> [Int]
-sort = unknown
+sort _ = unknown
 
 input = [26,18,5,4,16,8,22,17]

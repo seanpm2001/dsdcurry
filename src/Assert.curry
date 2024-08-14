@@ -5,7 +5,7 @@
 module Assert(Assert,makeAssert,waitOf,ddunifOf,
               aInt,aFloat,aChar,aBool,aOrdering,aSuccess,
               aList,aString,aUnit,aPair,aTriple,aTuple4,aMaybe,aEither,
-              aPolyType,aFun,
+              aPolyType,
               enforce, enforceIO, enforceAssertions,
               AssertKind(..),
               withContract1, withContract2,
@@ -15,12 +15,13 @@ module Assert(Assert,makeAssert,waitOf,ddunifOf,
              )  where
 
 import AssertParam
-import SetFunctions
-import GlobalVariable
-import System(getEnviron)
-import IO
-import AllSolutions
-import Unsafe
+import Control.Search.SetFunctions
+import Control.SearchTree  ( isDefined )
+import Control.Applicative ( when )
+import System.IO
+import System.IO.Unsafe    ( unsafePerformIO, spawnConstraint, showAnyTerm )
+import System.Environment  ( getEnv )
+import GlobalVariable      ( GVar, gvar, readGVar, writeGVar )
 
 --- Auxiliaries for pre/postcondition checking
 
@@ -33,14 +34,14 @@ debug = unsafePerformIO getDebugVar
 
 getDebugVar :: IO Bool
 getDebugVar = do
-  v <- getEnviron "ASSERTDEBUG"
+  v <- getEnv "ASSERTDEBUG"
   return (v=="yes")
 
 ---------------------------------------------------------------------------
 --- The main operation for enforceable assertions.
 --- (enforce e) evaluates the expression e (with assertions)
 --- so that unevaluated assertions are enforced before returning the result.
-enforce :: a -> a
+enforce :: Data a => a -> a
 enforce exp | (unsafePerformIO initAssertionQueue =:= ())
               &> exp=:=exp
             = (unsafePerformIO enforceAssertions =:= ())
@@ -95,7 +96,7 @@ checkPost fname eflag preflag result arg = case isViolation result of
 traceLines :: [String] -> a -> a
 traceLines ls e = unsafePerformIO (flushLines ls) `seq` e
  where
-  flushLines [] = done
+  flushLines []     = return ()
   flushLines (x:xs) = hPutStrLn stderr x >> hFlush stderr >> flushLines xs
 
 -- show operation used to show argument or result terms to the user:
@@ -107,7 +108,7 @@ showATerm = showAnyTerm
 ---------------------------------------------------------------------------
 -- Combinators for checking of contracts having pre- and postconditions
 
-withContract1 :: AssertKind -> Assert a -> Assert b -> String
+withContract1 :: (Data a, Data b) => AssertKind -> Assert a -> Assert b -> String
               -> (a -> CheckResult) -> (a -> b -> CheckResult)
               -> (a -> b) -> a -> b
 
@@ -145,7 +146,7 @@ withContract1 Enforceable (Assert waita ddunifa) (Assert waitb ddunifb)
   argx,fx,ef1,ef2 free
 
 
-withContract2 :: AssertKind -> Assert a -> Assert b -> Assert c -> String
+withContract2 :: (Data a, Data b, Data c) => AssertKind -> Assert a -> Assert b -> Assert c -> String
               -> (a -> b -> CheckResult) -> (a -> b -> c -> CheckResult)
               -> (a -> b -> c) -> a -> b -> c
 
@@ -192,7 +193,7 @@ withContract2 Enforceable (Assert waita ddunifa) (Assert waitb ddunifb)
 ---------------------------------------------------------------------------
 -- Combinators for checking contracts without postconditions:
 
-withPreContract1 :: AssertKind -> Assert a -> Assert b -> String
+withPreContract1 :: Data a => AssertKind -> Assert a -> Assert b -> String
                  -> (a -> CheckResult) -> (a -> b) -> a -> b
 
 withPreContract1 Strict _ _ fname precond fun arg
@@ -214,7 +215,7 @@ withPreContract1 Enforceable (Assert waita ddunifa) _ fname precond fun arg
   argx,ef1 free
 
 
-withPreContract2 :: AssertKind -> Assert a -> Assert b -> Assert c -> String
+withPreContract2 :: (Data a, Data b) => AssertKind -> Assert a -> Assert b -> Assert c -> String
                  -> (a -> b -> CheckResult) -> (a -> b -> c) -> a -> b -> c
 
 withPreContract2 Strict _ _ _ fname precond fun arg1 arg2
@@ -245,7 +246,7 @@ withPreContract2 Enforceable (Assert waita ddunifa) (Assert waitb ddunifb) _
 -- Combinators for checking contracts without preconditions:
 
 -- Add postcondition contract to 0-ary operation:
-withPostContract0 :: AssertKind -> Assert a -> String -> (a -> CheckResult)
+withPostContract0 :: Data a => AssertKind -> Assert a -> String -> (a -> CheckResult)
                   -> a -> a
 
 withPostContract0 Strict _ fname postcond val
@@ -269,7 +270,7 @@ withPostContract0 Enforceable (Assert waita ddunifa) fname postcond val
   valx,ef free
 
 
-withPostContract1 :: AssertKind -> Assert a -> Assert b -> String
+withPostContract1 :: (Data b, Data a) => AssertKind -> Assert a -> Assert b -> String
                          -> (a -> b -> CheckResult)
                          -> (a -> b) -> a -> b
 
@@ -300,7 +301,7 @@ withPostContract1 Enforceable (Assert waita ddunifa) (Assert waitb ddunifb)
   argx,fx,ef free
 
 
-withPostContract2 :: AssertKind -> Assert a -> Assert b -> Assert c -> String
+withPostContract2 :: (Data a, Data b, Data c) => AssertKind -> Assert a -> Assert b -> Assert c -> String
                          -> (a -> b -> c -> CheckResult)
                          -> (a -> b -> c) -> a -> b -> c
 
@@ -337,12 +338,12 @@ withPostContract2 Enforceable (Assert waita ddunifa) (Assert waitb ddunifb)
 
 --- Transform a unary set function into a function that returns some element
 --- of the result set instead of the complete set.
-someValueOf1 :: (a -> Values b) -> a -> b
+someValueOf1 :: Ord b => (a -> Values b) -> a -> b
 someValueOf1 setfun x = head (sortValues (setfun x))
 
 --- Transform a binary set function into a function that returns some element
 --- of the result set instead of the complete set.
-someValueOf2 :: (a -> b -> Values c) -> a -> b -> c
+someValueOf2 :: Ord c => (a -> b -> Values c) -> a -> b -> c
 someValueOf2 setfun x y = head (sortValues (setfun x y))
 
 ---------------------------------------------------------------------------
@@ -354,7 +355,7 @@ data Assert a = Assert (a->a) (a->a->a)
 --- It creates from a wait and a demand-driven unification operation for
 --- a given type an Assert instance for this type by adding a generic handler
 --- for logic variables as expressions in the demand-driven unification.
-makeAssert :: (a->a) -> (a->a->a) -> Assert a
+makeAssert :: Data a => (a->a) -> (a->a->a) -> Assert a
 makeAssert wait ddunif = Assert wait (withVarCheck ddunif)
 
 --- Returns the wait operation of an Assert instance.
@@ -369,7 +370,7 @@ ddunifOf (Assert _ ddunif) = ddunif
 -- If the third argument is a logic variable, unify it with the second
 -- (which is always a logic variable for passing the result) and return it,
 -- otherwise apply the first argument (the "real" demand-driven unification).
-withVarCheck :: (a -> a -> a) -> a -> a -> a
+withVarCheck :: Data a => (a -> a -> a) -> a -> a -> a
 withVarCheck ddunif x e = if isVar e then (x=:=e) &> e else ddunif x e
 
 -- Assert instances for various concrete types:
@@ -403,7 +404,7 @@ aUnit :: Assert ()
 aUnit = aPrimType
 
 --- Assert instance scheme for primitive (unstructured) types.
-aPrimType :: Assert a
+aPrimType :: Data a => Assert a
 aPrimType = Assert ensureNotFree ddunifPrimType
   where
    ddunifPrimType x i | x =:= i = i
@@ -411,20 +412,14 @@ aPrimType = Assert ensureNotFree ddunifPrimType
 --- Assert instance scheme for polymorphic values.
 --- Since we cannot examine the concrete structure of polymorphic values,
 --- we simply wait until the complete value becomes evaluated to a ground term.
-aPolyType :: Assert a
+aPolyType :: Data a => Assert a
 aPolyType = Assert ensureGround ddunifPolyType
   where
    ensureGround x = ensureNotFree (id $## x)
    ddunifPolyType x i | x =:= i = i
 
---- Assert instance for functional types.
---- Such assertions are implemented as assertions for primitive types
---- since functional objects are treated as constructors.
-aFun :: Assert a -> Assert b -> Assert (a -> b)
-aFun _ _ = aPrimType
-
 --- Assert instance for lists.
-aList :: Assert a -> Assert [a]
+aList :: Data a => Assert a -> Assert [a]
 aList (Assert waita ddunifa) = makeAssert waitList ddunifList
  where
   waitList l = case l of []     -> []
@@ -440,7 +435,7 @@ aString :: Assert String
 aString = aList aChar
 
 --- Assert instance for pairs.
-aPair :: Assert a -> Assert b -> Assert (a,b)
+aPair :: (Data a, Data b) => Assert a -> Assert b -> Assert (a,b)
 aPair (Assert waita ddunifa) (Assert waitb ddunifb) =
   makeAssert waitPair ddunifPair
  where
@@ -452,7 +447,7 @@ aPair (Assert waita ddunifa) (Assert waitb ddunifb) =
                   in x=:=(x1,x2) &> (ddunifa x1 a1, ddunifb x2 a2)
 
 --- Assert instance for triples.
-aTriple :: Assert a -> Assert b -> Assert c -> Assert (a,b,c)
+aTriple :: (Data a, Data b, Data c) => Assert a -> Assert b -> Assert c -> Assert (a,b,c)
 aTriple (Assert waita ddunifa) (Assert waitb ddunifb) (Assert waitc ddunifc) =
   makeAssert waitTriple ddunifTriple
  where
@@ -465,7 +460,8 @@ aTriple (Assert waita ddunifa) (Assert waitb ddunifb) (Assert waitc ddunifc) =
                         (ddunifa x1 a1, ddunifb x2 a2, ddunifc x3 a3)
 
 --- Assert instance for 4-tuples.
-aTuple4 :: Assert a -> Assert b -> Assert c -> Assert d -> Assert (a,b,c,d)
+aTuple4 :: (Data a, Data b, Data c, Data d)
+             => Assert a -> Assert b -> Assert c -> Assert d -> Assert (a,b,c,d)
 aTuple4 (Assert waita ddunifa) (Assert waitb ddunifb) (Assert waitc ddunifc)
         (Assert waitd ddunifd) =
   makeAssert waitTuple ddunifTuple
@@ -480,7 +476,7 @@ aTuple4 (Assert waita ddunifa) (Assert waitb ddunifb) (Assert waitc ddunifc)
              (ddunifa x1 a1, ddunifb x2 a2, ddunifc x3 a3, ddunifd x4 a4)
 
 --- Assert instance for Maybe values.
-aMaybe :: Assert a -> Assert (Maybe a)
+aMaybe :: Data a => Assert a -> Assert (Maybe a)
 aMaybe (Assert waita ddunifa) = makeAssert waitMaybe ddunifMaybe
  where
   waitMaybe e = case e of Nothing  -> Nothing
@@ -493,7 +489,7 @@ aMaybe (Assert waita ddunifa) = makeAssert waitMaybe ddunifMaybe
                     in (x =:= Just z) &> Just (ddunifa z y)
 
 --- Assert instance for Either values.
-aEither :: Assert a -> Assert b -> Assert (Either a b)
+aEither :: (Data a, Data b) => Assert a -> Assert b -> Assert (Either a b)
 aEither (Assert waita ddunifa) (Assert waitb ddunifb) =
    makeAssert waitEither ddunifEither
  where
@@ -545,7 +541,7 @@ registerAssertion :: () -> String -> String -> Success -> Success
 registerAssertion eflag fname pp asrt
   | -- in order to be sure that the global control variable is initialized
     -- in the spawned constraint:
-    unsafePerformIO (getAssertionControlVariable >> done) =:= ()
+    unsafePerformIO (getAssertionControlVariable >> return ()) =:= ()
   = spawnConstraint (delayedAssertion eflag fname pp asrt =:= ())
                     success
 
@@ -553,13 +549,13 @@ delayedAssertion :: () -> String -> String -> Success -> ()
 delayedAssertion eflag fname pp asrt = unsafePerformIO $ do
   v <- getAssertionControlVariable
   --putStrLn ("Delay assertion '"++fname++"': "++showAnyExpression asrt)
-  ensureNotFree v =:= ()  &> done
+  ensureNotFree v =:= () &> return ()
   --putStrLn ("Assertion '"++fname++"' activated: "++showAnyExpression asrt)
-  if isVar eflag
-   then do if debug
-            then putStrLn (pp++"condition of '"++fname++"' enforced...")
-            else done
-           asrt &> done
-   else done
-
+  when (isVar eflag) $ do 
+    when debug $ putStrLn (pp++"condition of '"++fname++"' enforced...")
+    asrt &> return ()
 ------------------------------------------------------------------------
+
+--- Returns True iff the argument is a free variable, i.e., has no value.
+isVar :: a -> Bool
+isVar = not . isDefined

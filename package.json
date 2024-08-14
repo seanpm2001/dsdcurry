@@ -6,10 +6,10 @@
     "synopsis": "A tool for declarative software development",
     "category": [ "Programming", "Debugging" ],
     "dependencies": {
-        "abstract-curry" : ">= 4.0.0"
-    },
-    "compilerCompatibility": {
-        "pakcs": ">= 1.10.0, < 2.0.0"
+      "base":             ">= 3.2.0, < 4.0.0",
+      "abstract-curry":   ">= 4.0.0, < 5.0.0",
+      "setfunctions":     ">= 3.0.0, < 4.0.0",
+      "global-variables": ">= 1.2.0, < 2.0.0"
     },
     "license": "BSD-3-Clause",
     "licenseFile": "LICENSE",

@@ -6,5 +6,5 @@ module AssertParam(CheckResult,isViolation) where
 type CheckResult = Bool
 
 isViolation :: CheckResult -> Bool
-isViolation result = not result  -- violation is result if False
+isViolation = not  -- violation is result if False
 

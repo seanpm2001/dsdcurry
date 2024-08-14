@@ -5,9 +5,9 @@
 
 module AssertParam(CheckResult,isViolation) where
 
-import SetFunctions
+import Control.Search.SetFunctions
 
 type CheckResult = Values Bool
 
 isViolation :: CheckResult -> Bool
-isViolation resultset = contains False resultset
+isViolation resultset = False `valueOf` resultset

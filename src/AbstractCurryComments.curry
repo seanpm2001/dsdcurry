@@ -6,11 +6,10 @@
 
 module AbstractCurryComments(readCurryWithComments,readComments) where
 
-import Char
 import AbstractCurry.Types
 import AbstractCurry.Files
-import Directory(doesFileExist)
-import List(isSuffixOf)
+import System.Directory(doesFileExist)
+import Data.List(isSuffixOf)
 
 --------------------------------------------------------------------------
 --- I/O action which parses a Curry program and returns the corresponding
@@ -31,8 +30,8 @@ readCurryWithComments progname = do
    else do (_,_,fcmts) <- readComments sourceFileName
            return (addCommentsInProg fcmts prog)
  where
-  addCommentsInProg fcmts (CurryProg mname imps types fdecls ops) =
-    CurryProg mname imps types (map (addCommentsInFunc fcmts) fdecls) ops
+  addCommentsInProg fcmts (CurryProg mname imps _ _ _ types fdecls ops) =
+    CurryProg mname imps Nothing [] [] types (map (addCommentsInFunc fcmts) fdecls) ops
 
   addCommentsInFunc fcmts fdecl@(CFunc fname ar vis ftype rules) =
     let fcmt = fcmts (snd fname)
@@ -52,8 +51,14 @@ readComments filename = do
   return (modcmts,
           \tname -> getDataComment tname cmtlines,
           \fname -> getFuncComment fname cmtlines)
+
+fst3 :: (a, b, c) -> a
 fst3 (x,_,_) = x
+
+trd3 :: (a, b, c) -> c
 trd3 (_,_,x) = x
+
+main :: String -> IO ()
 main f = do r <- readComments "SetFunctions.curry"
             putStrLn (trd3 r f)
 
@@ -74,6 +79,7 @@ data SourceLine = Comment String  -- a comment for CurryDoc
                 | DataDef String  -- a definition of a datatype
                 | ModDef          -- a line containing a module definition
                 | OtherLine       -- a line not relevant for CurryDoc
+  deriving (Eq)
 
 --- This datatype is used to categorize Curry libraries
 --- @cons General   - a general library
@@ -234,10 +240,8 @@ getDataComment n ((def, cmt):fdcmts) = case def of
 
 
 -- get all comments of a particular type (e.g., "param", "cons"):
-getCommentType :: a -> [(a,b)] -> [b]
+getCommentType :: Eq a => a -> [(a,b)] -> [b]
 getCommentType ctype cmts = map snd (filter (\c -> fst c == ctype) cmts)
-
-
 
 --------------------------------------------------------------------------
 -- Split a comment into its main part and parts preceded by "@...":

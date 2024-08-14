@@ -1,8 +1,7 @@
 -- Solving the n-queens problem
 
-import Integer(abs)
-import List
-import SetFunctions
+import Data.List
+import Control.SetFunctions
 
 -- Specification: queens are represented by a list of their (x,y)-positions
 -- and we directly specify all the "non-capture" conditions

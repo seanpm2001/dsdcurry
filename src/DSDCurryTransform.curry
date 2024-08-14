@@ -11,14 +11,19 @@ import AbstractCurry.Pretty
 import AbstractCurry.Build
 import AbstractCurry.Select
 import AbstractCurry.Transform
-import Directory
-import Distribution
-import FilePath     ( (</>) )
-import List
-import Maybe        ( fromJust )
-import System
-import Time
-import Unsafe
+
+import System.Directory
+import System.Environment  ( getArgs, setEnv )
+import System.CurryPath    ( stripCurrySuffix )
+import System.FilePath     ( (</>) )
+import System.Process      ( system )
+
+import Data.List           
+import Data.Maybe          ( fromJust )
+import Data.Time           ( compareClockTime )
+import Control.Applicative ( when )
+import Control.Monad       ( void )
+import Curry.Compiler.Distribution ( installDir )
 
 import DSDCurryPackageConfig(packagePath)
 
@@ -28,7 +33,7 @@ dsdSourceDir = packagePath </> "src"
 banner :: String
 banner = unlines [bannerLine,bannerText,bannerLine]
  where
-   bannerText = "DSDCurry Transformation Tool (Version of 02/05/16)"
+   bannerText = "DSDCurry Transformation Tool (Version of 01/08/24)"
    bannerLine = take (length bannerText) (repeat '=')
 
 ------------------------------------------------------------------------
@@ -40,6 +45,7 @@ data TParam = TParam Bool -- generate code for lazy assertions?
                      Bool -- load and execute transformed program?
                      Bool -- debug assertions during execution?
 
+defaultTParam :: TParam
 defaultTParam = TParam False False False False False False
 
 setStrictAssert  (TParam _ _ sf pcs ep db) = TParam False False sf pcs ep db
@@ -108,18 +114,16 @@ transformedModName m = m++"C"
 loadPAKCS :: TParam -> String -> IO ()
 loadPAKCS tparam m = do
   putStrLn $ "\nStarting PAKCS and loading module '"++m++"'..."
-  if withDebugging tparam then setEnviron "ASSERTDEBUG" "yes" else done
-  system $ installDir </> "bin" </> "pakcs :l " ++ m
-  done
+  when (withDebugging tparam) $ setEnv "ASSERTDEBUG" "yes"
+  void $ system $ installDir </> "bin" </> "pakcs :l " ++ m
 
 -- The main transformation function.
 transform :: TParam -> String -> IO ()
 transform tparam modname = do
   let acyfile = abstractCurryFileName modname
-  doesFileExist acyfile >>= \b -> if b then removeFile acyfile else done
+  doesFileExist acyfile >>= \b -> when b $ removeFile acyfile
   prog <- readCurryWithComments modname >>= return . addCmtFuncInProg
-  doesFileExist acyfile >>= \b -> if b then done
-                                       else error "Source program incorrect"
+  doesFileExist acyfile >>= \b -> when (not b) $ error "Source program incorrect"
   let realfdecls = filter isRealFuncDecl (functions prog)
       funspecs  = getFunSpecifications prog
       specnames = map (dropSpecName . snd . funcName) funspecs
@@ -134,22 +138,20 @@ transform tparam modname = do
       saveprog  = transformProgram tparam realfdecls funspecs preconds
                                    postconds prog
       savefile  = transformedModName modname ++ ".curry"
-  if null onlyprecond then done else
-     error
-      ("Operations with precondition but without implemenation/specification: "
-           ++ unwords onlyprecond)
-  if null newfuns then done else
-    putStrLn $ "Generating new definitions for operations: " ++ unwords newfuns
-  if null checkfuns then done else
-    putStrLn $ "Adding pre/postcondition checking to: " ++ unwords checkfuns
+  when (not $ null onlyprecond) $
+   error ("Operations with precondition but without implemenation/specification: "
+          ++ unwords onlyprecond)
+  when (not $ null newfuns) $ 
+   putStrLn $ "Generating new definitions for operations: " ++ unwords newfuns
+  when (not $ null checkfuns) $
+   putStrLn $ "Adding pre/postcondition checking to: " ++ unwords checkfuns
   if null (funspecs++preconds++postconds)
    then putStrLn "No specifcations or pre/postconditions found, no transformation required!"
    else do putStrLn $ "Writing transformed module to '" ++ savefile ++ "'..."
            writeFile savefile (showCProg saveprog)
            copyImportModules tparam
-           if executeProg tparam
-            then loadPAKCS tparam (transformedModName modname)
-            else done
+           when (executeProg tparam) $ 
+            loadPAKCS tparam (transformedModName modname)
   
 -- Is a function declaration a real implementation, i.e.,
 -- is the body different from "unknown"?
@@ -165,10 +167,9 @@ isUnknown rules = case rules of
 -- copy imported modules if necessary:
 copyImportModules tparam = do
   cdir <- getCurrentDirectory
-  if cdir==dsdSourceDir
-   then done
-   else mapIO_ (\m -> copyFileOnDemand (dsdSourceDir </> m++".curry")
-                                       (cdir </> m++".curry"))
+  when (cdir /= dsdSourceDir) $
+   mapM_ (\m -> copyFileOnDemand (dsdSourceDir </> m++".curry")
+                                         (cdir </> m++".curry"))
                ["Assert"]
   let paramMod = if withEncapsulate tparam then "AssertParamEncapsulate"
                                            else "AssertParamNonEncapsulate"
@@ -194,7 +195,7 @@ getPostConditions prog = filter (isPostCondName . snd . funcName)
 transformProgram :: TParam -> [CFuncDecl] -> [CFuncDecl] -> [CFuncDecl]
                  -> [CFuncDecl] -> CurryProg -> CurryProg
 transformProgram tparam allfdecls specdecls predecls postdecls
-                 (CurryProg mname imps tdecls fdecls opdecls) =
+                 (CurryProg mname imps _ _ _ tdecls fdecls opdecls) =
  let newspecfuns  = concatMap (genFunction4Spec tparam fdecls) specdecls
      newpostspecs = concatMap (genFunction4PostCond tparam fdecls) postdecls
      newpostspecnames = map (snd . funcName) newpostspecs
@@ -212,6 +213,7 @@ transformProgram tparam allfdecls specdecls predecls postdecls
   in renameCurryModule (transformedModName mname) $
        CurryProg mname
                  (nub ("Assert":"SetFunctions":imps))
+                 Nothing [] []
                  tdecls
                  (map deleteCmtIfEmpty
                       (map (addContract tparam predecls contractpcs)
@@ -222,8 +224,8 @@ transformProgram tparam allfdecls specdecls predecls postdecls
 
 -- Add an empty comment to each function which has no comment
 addCmtFuncInProg :: CurryProg -> CurryProg
-addCmtFuncInProg (CurryProg mname imps tdecls fdecls opdecls) =
-  CurryProg mname imps tdecls (map addCmtFunc fdecls) opdecls
+addCmtFuncInProg (CurryProg mname imps _ _ _ tdecls fdecls opdecls) =
+  CurryProg mname imps Nothing [] [] tdecls (map addCmtFunc fdecls) opdecls
  where
   addCmtFunc (CFunc qn ar vis texp rs) = CmtFunc "" qn ar vis texp rs
   addCmtFunc (CmtFunc cmt qn ar vis texp rs) = CmtFunc cmt qn ar vis texp rs
@@ -249,7 +251,7 @@ genFunction4Spec _ allfuncs (CmtFunc cmt (m,f) ar vis texp _) =
 -- otherwise generate a set containment check.
 genPostCond4Spec :: TParam -> [CFuncDecl] -> [CFuncDecl] -> CFuncDecl
                  -> [CFuncDecl]
-genPostCond4Spec _ allfdecls postdecls (CmtFunc _ (m,f) ar vis texp _) =
+genPostCond4Spec _ allfdecls postdecls (CmtFunc _ (m,f) ar vis qt _) =
  let fname     = dropSpecName f
      detspec   = isDetSpecName f -- determ. spec? (later: use prog.ana.)
      fpostname = fname++"'post"
@@ -261,6 +263,7 @@ genPostCond4Spec _ allfdecls postdecls (CmtFunc _ (m,f) ar vis texp _) =
      argvars   = map (\i -> (i,"x"++show i)) [1..(ar+1)]
      spargvars = take ar argvars
      resultvar = last argvars
+     (c, texp) = (qualType2Context qt, qualType2Type qt)
      gtype     = CTVar (0,"grt") -- result type of observation function
      varz      = (ar+2,"z")
      obsfun    = maybe (pre "id")
@@ -271,7 +274,7 @@ genPostCond4Spec _ allfdecls postdecls (CmtFunc _ (m,f) ar vis texp _) =
                   [CLocalPat (CPVar varz)
                        (CSimpleRhs (CApply (CVar varg) (CVar resultvar)) []),
                    CLocalFunc (cfunc (m,"gspec") ar Private
-                      (replaceResultType texp gtype)
+                      (addContext c (replaceResultType texp gtype))
                       [let gsargvars = map (\i -> (i,"y"++show i)) [1..ar] in
                        simpleRule (map CPVar gsargvars)
                                   (CApply (CVar varg)
@@ -290,7 +293,7 @@ genPostCond4Spec _ allfdecls postdecls (CmtFunc _ (m,f) ar vis texp _) =
        ("Parametric postcondition for '"++fname++
         "' (generated from specification). "++oldcmt)
        (m,fpgenname) (ar+2) vis
-       ((resultType texp ~> gtype) ~> extendFuncType texp boolType)
+       (addContext c $ (resultType texp ~> gtype) ~> extendFuncType texp boolType)
        [if null oldfpostc
         then simpleRule (map CPVar (varg:argvars)) postcheck
         else simpleRuleWithLocals
@@ -305,7 +308,7 @@ genPostCond4Spec _ allfdecls postdecls (CmtFunc _ (m,f) ar vis texp _) =
        ("Postcondition for '"++fname++"' (generated from specification). "++
         oldcmt)
        (m,fpostname) (ar+1) vis
-       (extendFuncType texp boolType)
+       (addContext c $ extendFuncType texp boolType)
        [simpleRule (map CPVar argvars)
                    (applyF (m,fpgenname)
                            (constF obsfun : map CVar argvars))]
@@ -315,11 +318,12 @@ genPostCond4Spec _ allfdecls postdecls (CmtFunc _ (m,f) ar vis texp _) =
 -- neither a specification nor an implementation for this function,
 -- i.e., consider this postcondition as a specification for an implementation:
 genFunction4PostCond :: TParam -> [CFuncDecl] -> CFuncDecl -> [CFuncDecl]
-genFunction4PostCond tparam allfuncs (CmtFunc cmt (m,f) _ vis texp _) =
+genFunction4PostCond tparam allfuncs (CmtFunc cmt (m,f) _ vis qt _) =
  let fname     = dropPostCondName f
      flname    = if withSinglePostSpecs tparam then fname++"''" else fname
+     (c, texp) = (qualType2Context qt, qualType2Type qt)
      ar        = arityOfType texp - 1
-     ftype     = transPCType f texp
+     ftype     = addContext c $ transPCType f texp
      deffuncs  = filter (\fd -> isRealFuncDecl fd &&
                                 (snd (funcName fd) == fname ||
                                  dropSpecName (snd (funcName fd)) == fname))
@@ -344,8 +348,9 @@ genFunction4PostCond tparam allfuncs (CmtFunc cmt (m,f) _ vis texp _) =
 
 -- adds contract checking to a function if it has a pre- or postcondition
 addContract :: TParam -> [CFuncDecl] -> [CFuncDecl] -> CFuncDecl -> CFuncDecl
-addContract tparam predecls postdecls fdecl@(CmtFunc cmt (m,f) ar vis texp _) =
- let asrttypes = map toPolymorphicAssertTypes (getArgResultTypes texp)
+addContract tparam predecls postdecls fdecl@(CmtFunc cmt (m,f) ar vis qt _) =
+ let texp      = qualType2Type qt
+     asrttypes = map toPolymorphicAssertTypes (getArgResultTypes texp)
      argvars   = map (\i -> (i,"x"++show i)) [1..ar]
      predecl   = find (\fd -> dropPreCondName(snd(funcName fd)) == f) predecls
      prename   = funcName (fromJust predecl)
@@ -372,13 +377,14 @@ addContract tparam predecls postdecls fdecl@(CmtFunc cmt (m,f) ar vis texp _) =
                          map CVar argvars)
      rename qf = if qf==(m,f) then (m,f++"'") else qf
   in if predecl==Nothing && postdecl==Nothing then fdecl else
-       cmtfunc cmt (transformedModName m,f) ar vis texp
+       cmtfunc cmt (transformedModName m,f) ar vis qt
          [simpleRuleWithLocals (map CPVar argvars)
                 asrtCall
                 [updQNamesInCLocalDecl rename (CLocalFunc (deleteCmt fdecl))]]
 
 
 -- Get types of arguments and result
+getArgResultTypes :: CTypeExpr -> [CTypeExpr]
 getArgResultTypes t = case t of
   CFuncType t1 t2 -> t1 : getArgResultTypes t2
   _               -> [t]
@@ -396,10 +402,8 @@ toAssertTypes :: ((Int,String) -> CExpr) -> CTypeExpr -> CExpr
 toAssertTypes mapvar (CTVar tv) = mapvar tv
 toAssertTypes mapvar (CFuncType t1 t2) =
   applyF (aMod "aFun") (map (toAssertTypes mapvar) [t1,t2])
-
-toAssertTypes mapvar (CTCons (tm,tc) targs) =
-  applyF (if tm=="Prelude" then aMod (preludeTCons2Assert tc) else (tm,'a':tc))
-         (map (toAssertTypes mapvar) targs)
+toAssertTypes _      (CTCons (tm,tc)) =
+  applyF (if tm=="Prelude" then aMod (preludeTCons2Assert tc) else (tm,'a':tc)) []
  where
   preludeTCons2Assert c = case c of
     "Int"      -> "aInt"
@@ -416,47 +420,58 @@ toAssertTypes mapvar (CTCons (tm,tc) targs) =
     "(,)"      -> "aPair"
     "(,,)"     -> "aTriple"
     "(,,,)"    -> "aTuple4"
-    _          -> error ("Lazy assertion of type '"++c++"' not yet supported!")
+    _          -> error ("Lazy assertion of type '" ++ c ++" ' not yet supported!")
 
  
 -- Transforms the type of a postcondition into a type for the
 -- corresponding function.
 transPCType f t = case t of
-  CFuncType t1 (CTCons _ _) -> t1
-  CFuncType t1 t2 -> CFuncType t1 (transPCType f t2)
+  CFuncType t1 (CTCons _) -> t1
+  CFuncType t1 t2         -> CFuncType t1 (transPCType f t2)
   _ -> error ("Illegal type of postcondition \""++f++"\"!")
 
+-- Computes the (first-order) arity of a qualified type.
+arityOfQualType :: CQualTypeExpr -> Int
+arityOfQualType (CQualType _ t) = arityOfType t
+
 -- Computes the (first-order) arity of a type.
+arityOfType :: CTypeExpr -> Int
 arityOfType t = case t of
   CFuncType _ t' -> 1 + arityOfType t'
   _ -> 0
 
-
 -- Is this the name of a specification?
+isSpecName :: String -> Bool
 isSpecName f = let rf = reverse f
                 in take 5 rf == "ceps'" || take 6 rf == "dceps'"
 
 -- Is this the name of a deterministic specification?
+isDetSpecName :: String -> Bool
 isDetSpecName f = take 6 (reverse f) == "dceps'"
 
 -- Drop the specification suffix from the name:
+dropSpecName :: String -> String
 dropSpecName f =
   let rf = reverse f
    in reverse (drop (if take 5 rf == "ceps'" then 5 else
                      if take 6 rf == "dceps'" then 6 else 0) rf)
 
 -- Is this the name of a precondition?
+isPreCondName :: String -> Bool
 isPreCondName f = take 4 (reverse f) == "erp'"
 
 -- Drop the precondition suffix from the name:
+dropPreCondName :: String -> String
 dropPreCondName f =
   let rf = reverse f
    in reverse (drop (if take 4 rf == "erp'" then 4 else 0) rf)
 
 -- Is this the name of a precondition?
+isPostCondName :: String -> Bool
 isPostCondName f = take 5 (reverse f) == "tsop'"
 
 -- Drop the postcondition suffix from the name:
+dropPostCondName :: String -> String
 dropPostCondName f =
   let rf = reverse f
    in reverse (drop (if take 5 rf == "tsop'" then 5 else 0) rf)
@@ -478,35 +493,36 @@ genAssertInstance :: CTypeDecl -> CFuncDecl
 genAssertInstance (CTypeSyn (mn,tc) _ targs texp) =
   cfunc
    (mn,'a':tc) 1 Public
-   (foldr (\tv t -> CTCons (aMod "Assert") [CTVar tv] ~> t)
-          (CTCons (aMod "Assert") [CTCons (mn,tc) (map CTVar targs)])
-          targs)
+   (emptyClassType $ foldr (\tv t -> applyTC (aMod "Assert") [CTVar tv] ~> t)
+                           (applyTC (aMod "Assert") 
+                             [applyTC (mn,tc) (map CTVar targs)])
+                           targs)
    [simpleRule (map (\ (i,s) -> CPVar (i,"assert_"++s)) targs)
                (toLocalAssertType texp)]
 
-genAssertInstance (CType (mn,tc) _ targs tcs) =
+genAssertInstance (CType (mn,tc) _ targs tcs _) =
   cfunc
    (mn,'a':tc) 1 Public
-   (foldr (\tv t -> CTCons (aMod "Assert") [CTVar tv] ~> t)
-          (CTCons (aMod "Assert") [mtype])
+   (emptyClassType $ foldr (\tv t -> applyTC (aMod "Assert") [CTVar tv] ~> t)
+          (applyTC (aMod "Assert") [mtype])
           targs)
    [simpleRuleWithLocals
      (map (\ (i,s) -> CPVar (i,"assert_"++s)) targs)
      (applyF (aMod "makeAssert") [CSymbol (mn,"wait"++tc),
                                   CSymbol (mn,"ddunif"++tc)])
-     [CLocalFunc $
+     [CLocalFunc $ 
         cfunc (mn,"wait"++tc) 1 Private
-              (mtype ~> mtype)
+              (emptyClassType $ mtype ~> mtype)
               [simpleRule [CPVar wvar]
                           (CCase CRigid (CVar wvar) (map tc2waitbranch tcs))],
       CLocalFunc $
         cfunc (mn,"ddunif"++tc) 1 Private
-              (mtype ~> mtype ~> mtype)
+              (emptyClassType $ mtype ~> mtype ~> mtype)
               [simpleRule [CPVar uvar1, CPVar uvar2]
                           (CCase CRigid (CVar uvar2) (map tc2unifbranch tcs))]
      ]]
  where
-  mtype = CTCons (mn,tc) (map CTVar targs)
+  mtype = applyTC (mn,tc) (map CTVar targs)
   wvar = (1,"wv")
   uvar1 = (1,"x")
   uvar2 = (2,"exp")
@@ -537,7 +553,7 @@ genAssertInstance (CType (mn,tc) _ targs tcs) =
                                          (CVar (i,"assert_"++tv) : args)
   texp2wait texp@(CFuncType _ _) args =
     applyF (aMod "waitOf") (toLocalAssertType texp : args)
-  texp2wait texp@(CTCons (tm,tcons) _) args =
+  texp2wait texp@(CTCons (tm,tcons)) args =
     if texp==mtype -- recursive type?
     then applyF (tm,"wait"++tcons) args
     else applyF (aMod "waitOf") (toLocalAssertType texp : args)
@@ -546,7 +562,7 @@ genAssertInstance (CType (mn,tc) _ targs tcs) =
                                          (CVar (i,"assert_"++tv) : args)
   texp2unif texp@(CFuncType _ _) args =
     applyF (aMod "ddunifOf") (toLocalAssertType texp : args)
-  texp2unif texp@(CTCons (tm,tcons) _) args =
+  texp2unif texp@(CTCons (tm,tcons)) args =
     if texp==mtype -- recursive type?
     then applyF (tm,"ddunif"++tcons) args
     else applyF (aMod "ddunifOf") (toLocalAssertType texp : args)
@@ -554,6 +570,18 @@ genAssertInstance (CType (mn,tc) _ targs tcs) =
 -- Transforms a type expression into an assertion instance expression
 -- of this type.
 toLocalAssertType = toAssertTypes (\ (i,tv) -> CVar (i,"assert_"++tv))
+
+-- Converts a type expression into qualified type expression
+addContext :: CContext -> CTypeExpr -> CQualTypeExpr
+addContext = CQualType
+
+-- Extracts the type of a qualified type expression
+qualType2Type :: CQualTypeExpr -> CTypeExpr
+qualType2Type (CQualType _ t) = t
+
+-- Extracts the context of a qualified type expression
+qualType2Context :: CQualTypeExpr -> CContext
+qualType2Context (CQualType c _) = c
 
 -- Computes result type of a function type
 resultType :: CTypeExpr -> CTypeExpr
@@ -563,14 +591,14 @@ resultType texp = case texp of CFuncType _ t -> resultType t
 -- Replaces a result type of a function type by a new type
 replaceResultType :: CTypeExpr -> CTypeExpr -> CTypeExpr
 replaceResultType texp ntype =
-  case texp of CFuncType t1 t2 -> CFuncType t1 (replaceResultType t2 ntype)
-               _               -> ntype
+    case texp of CFuncType t1 t2 -> CFuncType t1 (replaceResultType t2 ntype)
+                 _               -> ntype
 
 -- Transform a n-ary function type into a (n+1)-ary function type with
 -- a given new result type
 extendFuncType :: CTypeExpr -> CTypeExpr -> CTypeExpr
-extendFuncType t@(CTVar _) texp = t ~> texp
-extendFuncType t@(CTCons _ _) texp = t ~> texp
+extendFuncType t@(CTVar  _) texp = t ~> texp
+extendFuncType t@(CTCons _) texp = t ~> texp
 extendFuncType (CFuncType t1 t2) texp = t1 ~> (extendFuncType t2 texp)
 
 ------------------------------------------------------------------------
@@ -587,11 +615,10 @@ copyFileOnDemand source target = do
   if exfile
    then do odate <- getModificationTime source
            ndate <- getModificationTime target
-           osize <- fileSize source
-           nsize <- fileSize target
-           if compareClockTime ndate odate /= LT && osize == nsize
-            then done
-            else copycmd
+           osize <- getFileSize source
+           nsize <- getFileSize target
+           when (compareClockTime ndate odate == LT || osize /= nsize) $
+            copycmd
    else copycmd
 
 ------------------------------------------------------------------------
